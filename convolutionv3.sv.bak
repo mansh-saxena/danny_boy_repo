@@ -1,0 +1,130 @@
+module convolution #(parameter W = 8, W_FRAC = 0, WIDTH = 640, HEIGHT = 480) (
+    input clk,
+    input ready,
+    input logic [W-1:0] pixel_data_in,
+    output logic [W-1:0] pixel_data_out
+);
+
+    localparam SR_LENGTH = 3*WIDTH;
+    localparam K = 3;
+
+    logic signed [30:0] counter = 0;
+    logic [1:0] conv_ready = 0;
+    logic signed [30:0] output_counter = 0;
+
+	logic signed [W-1:0] kernel [2:0][2:0];
+	initial begin
+		 kernel[0][0] = 8'h1; kernel[0][1] = 8'h2; kernel[0][2] = 8'h1;
+		 kernel[1][0] = 8'h2; kernel[1][1] = 8'h4; kernel[1][2] = 8'h2;
+		 kernel[2][0] = 8'h1; kernel[2][1] = 8'h2; kernel[2][2] = 8'h1;
+	end
+
+
+    // Shift register to hold pixel data
+    logic signed [W-1:0] shift_reg [0:WIDTH*3 - 1];
+
+    // Pipeline registers for each stage
+    logic signed [2*W-1:0] mult_stage1 [8:0];  // Store multiplications
+    logic signed [2*W:0] macc_stage2;          // Store accumulation
+
+    // Stage 1: Load shift register and prepare conv_ready signal
+    always_ff @(posedge clk) begin : h_shift_register
+				shift_reg[0] <= signed'(pixel_data_in);
+
+            output_counter <= output_counter+ 1;
+				for (int i = 1; i < WIDTH*K; i++) begin
+					shift_reg[i] <= shift_reg[i-1];
+				end
+
+    end
+	
+	logic column = 0;
+	logic wait_flag = 0;
+	
+	assign column = output_counter % WIDTH;
+	
+	always_ff @(posedge clk) begin
+		if (output_counter < WIDTH*HEIGHT) begin
+			output_counter <= output_counter + 1;
+		end
+	end
+	
+	always_ff @(posedge clk) begin
+		if  ((column < K-1) || (output_counter < (K -1) * WIDTH)) begin
+			wait_flag <= 1'b1;
+		end else  begin
+			wait_flag <= 1'b0;
+		end
+	end
+	
+    // Stage 2: Multiply each register by corresponding kernel value
+//    always_ff @(posedge clk) begin : mult_stage
+//			if (ready) begin
+//            mult_stage1[0] <= signed'(shift_reg[0]) * signed'(kernel[0][0]);
+//            mult_stage1[1] <= signed'(shift_reg[1]) * signed'(kernel[0][1]);
+//            mult_stage1[2] <= signed'(shift_reg[2]) * signed'(kernel[0][2]);
+//            mult_stage1[3] <= signed'(shift_reg[WIDTH]) * signed'(kernel[1][0]);
+//            mult_stage1[4] <= signed'(shift_reg[WIDTH+1]) * signed'(kernel[1][1]);
+//            mult_stage1[5] <= signed'(shift_reg[WIDTH+2]) * signed'(kernel[1][2]);
+//            mult_stage1[6] <= signed'(shift_reg[WIDTH*2]) * signed'(kernel[2][0]);
+//            mult_stage1[7] <= signed'(shift_reg[WIDTH*2+1]) * signed'(kernel[2][1]);
+//            mult_stage1[8] <= signed'(shift_reg[WIDTH*2+2]) * signed'(kernel[2][2]);
+//			end
+//	 end
+
+always_comb begin : h_multiply
+	if (ready) begin
+    mult_stage1[0 + 0] = signed'(shift_reg[0]) * signed'(kernel[2][2]); // Top-left
+    mult_stage1[0 + 1] = signed'(shift_reg[1]) * signed'(kernel[2][1]); // Top-middle
+    mult_stage1[0 + 2] = signed'(shift_reg[2]) * signed'(kernel[2][0]); // Top-right
+
+    // For i = 1, j = 0 to 2
+    mult_stage1[1 + 0] = signed'(shift_reg[WIDTH + 0]) * signed'(kernel[1][2]); // Middle-left
+    mult_stage1[1 + 1] = signed'(shift_reg[WIDTH + 1]) * signed'(kernel[1][1]); // Middle-middle
+    mult_stage1[1 + 2] = signed'(shift_reg[WIDTH + 2]) * signed'(kernel[1][0]); // Middle-right
+
+    // For i = 2, j = 0 to 2
+    mult_stage1[2 + 0] = signed'(shift_reg[2*WIDTH + 0]) * signed'(kernel[0][2]); // Bottom-left
+    mult_stage1[2 + 1] = signed'(shift_reg[2*WIDTH + 1]) * signed'(kernel[0][1]); // Bottom-middle
+    mult_stage1[2 + 2] = signed'(shift_reg[2*WIDTH + 2]) * signed'(kernel[0][0]); // Bottom-right
+	end
+end	
+
+// Stage 2: Assign the same constant value to mult_stage
+//always_ff @(posedge clk) begin : mult_stage
+//    if (ready) begin
+//        // Assign the same constant value to all stages
+//        mult_stage1[0] <= signed'(12'h000A); // Example constant value (adjust as needed)
+//        mult_stage1[1] <= signed'(12'h000A); 
+//        mult_stage1[2] <= signed'(12'h000A); 
+//        mult_stage1[3] <= signed'(12'h000A); 
+//        mult_stage1[4] <= signed'(12'h000A); 
+//        mult_stage1[5] <= signed'(12'h000A); 
+//        mult_stage1[6] <= signed'(12'h000A); 
+//        mult_stage1[7] <= signed'(12'h000A); 
+//        mult_stage1[8] <= signed'(12'h000A); 
+//    end
+//end
+
+
+    // Stage 3: Accumulate the multiplication results
+    always_ff @(posedge clk) begin : accumulate_stage
+			if (ready) begin
+			  macc_stage2 <= mult_stage1[0] + mult_stage1[1] + mult_stage1[2] +
+								  mult_stage1[3] + mult_stage1[4] + mult_stage1[5] +
+								  
+								  mult_stage1[6] + mult_stage1[7] + mult_stage1[8];
+								  
+			end
+    end
+
+    // Stage 4: Output the final result
+    always_ff @(posedge clk) begin : output_stage
+        if (wait_flag & ready) begin
+				pixel_data_out <= 8'hfff;
+//            pixel_data_out <= macc_stage2[W];  // Properly truncate or clip the result to W bits
+				
+        end
+    end
+
+endmodule
